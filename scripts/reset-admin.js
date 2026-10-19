@@ -1,4 +1,5 @@
 // Offline recovery only: stop the clinic first. Passwords are never printed.
+import {cliDataDirectory} from './desktop-config.js';
 import {DatabaseSync} from 'node:sqlite';
 import {randomBytes,scryptSync} from 'node:crypto';
 import {readFileSync,existsSync} from 'node:fs';
@@ -7,7 +8,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 const username=process.argv[2];
 if(!username||username.startsWith('--')||!process.argv.includes('--server-stopped')){console.error('Usage: node scripts/reset-admin.js USERNAME --server-stopped\nStop all clinic server processes before offline administrator recovery.');process.exit(1);}
-const dir=process.env.DATA_DIR||path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../data');
+const dir=cliDataDirectory(process.env,path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'));
 const source=path.join(dir,'clinic.sqlite');if(!existsSync(source))throw Error('Clinic database not found');
 const db=new DatabaseSync(source);
 try{

@@ -24,7 +24,7 @@ try {
         # any existing clinic database or installing system-wide software.
         if (-not $env:LOCALAPPDATA) { throw 'Windows LOCALAPPDATA folder is unavailable.' }
         $homeDirectory = Join-Path $env:LOCALAPPDATA 'YawarClinic'
-        $installDirectory = Join-Path $homeDirectory 'app-launcher-v2'
+        $installDirectory = Join-Path $homeDirectory 'app-launcher-v3'
         New-Item -ItemType Directory -Path $homeDirectory -Force | Out-Null
         if (-not (Test-ClinicFolder $installDirectory)) {
             Write-Host 'Full application files are missing (often caused by opening a ZIP directly).'

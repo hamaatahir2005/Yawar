@@ -1,6 +1,6 @@
 {
   "name": "yawar-dental-clinic",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,8 @@
     "dev": "node --watch server.js",
     "test": "node --test",
     "local": "node scripts/launch.js",
-    "backup": "node scripts/backup.js"
+    "backup": "node scripts/backup.js",
+    "desktop": "node scripts/desktop.js"
   },
   "engines": {
     "node": ">=24"

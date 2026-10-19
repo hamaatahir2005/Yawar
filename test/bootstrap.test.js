@@ -43,7 +43,7 @@ test('embedded Windows recovery launcher handles ZIP-only, installed, cached and
   });
   const temporary=path.join(root,'Explorer ZIP Temp');mkdirSync(temporary);const entry=path.join(temporary,'Start-Clinic.cmd');writeFileSync(entry,source);const local=path.join(root,'Local AppData');mkdirSync(path.join(local,'YawarClinic','data'),{recursive:true});const marker=path.join(local,'YawarClinic','data','existing-patient-data.txt');writeFileSync(marker,'preserve');
   await t.test('CMD extracted alone downloads complete source and preserves existing data',()=>{
-   const r=invoke(entry,local,online);assert.equal(r.status,0,r.stdout+r.stderr);assert.match(r.stdout,/Downloading/);assert.match(r.stdout,/FIXTURE_LAUNCHED/);assert.ok(existsSync(path.join(local,'YawarClinic','app-launcher-v2','scripts','launch.js')));assert.equal(readFileSync(marker,'utf8'),'preserve');assert.ok(r.stdout.includes('Persistent clinic data:'));
+   const r=invoke(entry,local,online);assert.equal(r.status,0,r.stdout+r.stderr);assert.match(r.stdout,/Downloading/);assert.match(r.stdout,/FIXTURE_LAUNCHED/);assert.ok(existsSync(path.join(local,'YawarClinic','app-launcher-v3','scripts','launch.js')));assert.equal(readFileSync(marker,'utf8'),'preserve');assert.ok(r.stdout.includes('Persistent clinic data:'));
   });
   await t.test('subsequent ZIP-only starts reuse the offline installed application',()=>{
    const r=invoke(entry,local,offline);assert.equal(r.status,0,r.stdout+r.stderr);assert.match(r.stdout,/FIXTURE_LAUNCHED/);assert.ok(!r.stdout.includes('Downloading'));
@@ -52,7 +52,7 @@ test('embedded Windows recovery launcher handles ZIP-only, installed, cached and
    const custom=path.join(root,'custom data');const r=invoke(entry,local,offline,{DATA_DIR:custom});assert.equal(r.status,0,r.stdout+r.stderr);assert.ok(r.stdout.includes(custom));
   });
   await t.test('incomplete download fails clearly without replacing user files',()=>{
-   const brokenLocal=path.join(root,'broken local');const incomplete=path.join(brokenLocal,'YawarClinic','app-launcher-v2');mkdirSync(incomplete,{recursive:true});writeFileSync(path.join(incomplete,'keep.txt'),'preserve');
+   const brokenLocal=path.join(root,'broken local');const incomplete=path.join(brokenLocal,'YawarClinic','app-launcher-v3');mkdirSync(incomplete,{recursive:true});writeFileSync(path.join(incomplete,'keep.txt'),'preserve');
    const r=invoke(entry,brokenLocal,"function Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$TimeoutSec) Set-Content -LiteralPath $OutFile -Value 'not a zip' }");assert.equal(r.status,1);assert.match(r.stdout,/Unable to start Yawar/);assert.equal(readFileSync(path.join(incomplete,'keep.txt'),'utf8'),'preserve');
   });
  }finally{rmSync(root,{recursive:true,force:true});}

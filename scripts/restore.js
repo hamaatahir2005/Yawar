@@ -1,10 +1,11 @@
+import { cliDataDirectory } from './desktop-config.js';
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync, copyFileSync, unlinkSync, chmodSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const source=process.argv[2];
 if(!source||!process.argv.includes('--server-stopped')){console.error('Usage: node scripts/restore.js /path/backup.sqlite --server-stopped\nStop every clinic server process before restoring. Existing data is preserved in a recovery copy.');process.exit(1);}
-const dir=process.env.DATA_DIR||path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../data');
+const dir=cliDataDirectory(process.env,path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'));
 const target=path.join(dir,'clinic.sqlite');
 if(path.resolve(source)===path.resolve(target))throw Error('Backup source must differ from target');
 const sourceDb=new DatabaseSync(source,{readOnly:true});

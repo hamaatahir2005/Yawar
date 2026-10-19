@@ -1,3 +1,4 @@
+import { cliDataDirectory } from './desktop-config.js';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { mkdirSync, readdirSync, statSync, chmodSync, unlinkSync, renameSync, existsSync } from 'node:fs';
 import path from 'node:path';
@@ -19,7 +20,7 @@ export async function createBackup(db, directory, retain=14){
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(path.resolve(process.argv[1])).href){
  const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
- const data=process.env.DATA_DIR||path.join(root,'data');
+ const data=cliDataDirectory(process.env,root);
  const source=path.join(data,'clinic.sqlite');
  if(!existsSync(source))throw Error('Start the clinic once before making backups');
  const db=new DatabaseSync(source,{readOnly:true});

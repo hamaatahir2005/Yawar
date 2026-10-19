@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { dataIdentity } from './scripts/desktop-config.js';
 import { createBackup } from './scripts/backup.js';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
@@ -39,6 +40,8 @@ const cols=db.prepare('PRAGMA table_info(patients)').all().map(c=>c.name);
 for(const [name,type] of [['birth_date',"TEXT NOT NULL DEFAULT ''"],['gender',"TEXT NOT NULL DEFAULT ''"],['address',"TEXT NOT NULL DEFAULT ''"],['allergies',"TEXT NOT NULL DEFAULT ''"]])if(!cols.includes(name))db.exec(`ALTER TABLE patients ADD COLUMN ${name} ${type}`);
 // Additive upgrades preserve clinical and financial history.
 function addColumn(table,name,type){if(!db.prepare(`PRAGMA table_info(${table})`).all().some(c=>c.name===name))db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);}
+addColumn('patients','registered_date',"TEXT NOT NULL DEFAULT ''");
+db.exec("UPDATE patients SET registered_date=substr(created,1,10) WHERE registered_date=''");
 addColumn('appointments','duration','INTEGER NOT NULL DEFAULT 30');
 addColumn('appointments','doctor',"TEXT NOT NULL DEFAULT ''");
 addColumn('treatments','plan_id','INTEGER REFERENCES plans(id)');
@@ -58,6 +61,7 @@ const clean=(v,max=500)=>typeof v==='string'?v.trim().slice(0,max):'';
 const validDate=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(v)&&!isNaN(Date.parse(v))&&new Date(v).toISOString().slice(0,10)===v;
 const int=v=>Number.isSafeInteger(v)&&v>=0;
 const fail=(message,status=400)=>{const e=Error(message);e.status=status;throw e;};
+const localToday=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;};
 const requireDate=v=>{if(!validDate(v))fail('بەروار دروست نییە');return v;};
 const required=(v,max=500)=>{const t=clean(v,max);if(!t)fail('تکایە خانە پێویستەکان پڕ بکەرەوە');return t;};
 const hashPassword=p=>{const salt=randomBytes(16).toString('hex');return salt+':'+scryptSync(p,salt,64).toString('hex');};
@@ -85,10 +89,10 @@ function create(entity,b,u){
  let result;
  if(entity==='patients'){
   if(b.birth_date&&!validDate(b.birth_date))fail('بەرواری لەدایکبوون نادروستە');
-  result=db.prepare('INSERT INTO patients(name,phone,history,birth_date,gender,address,allergies) VALUES(?,?,?,?,?,?,?)').run(required(b.name,100),required(b.phone,40),clean(b.history,3000),clean(b.birth_date,10),clean(b.gender,20),clean(b.address),clean(b.allergies,1000));
+  result=db.prepare('INSERT INTO patients(name,phone,history,birth_date,gender,address,allergies,registered_date) VALUES(?,?,?,?,?,?,?,?)').run(required(b.name,100),required(b.phone,40),clean(b.history,3000),clean(b.birth_date,10),clean(b.gender,20),clean(b.address),clean(b.allergies,1000),requireDate(b.registered_date??localToday()));
  }else if(entity==='treatments'){
   if(!Number.isInteger(b.patient_id)||!teeth.includes(b.tooth)||!int(b.cost)||!int(b.paid)||b.paid>b.cost)fail('نرخ، پارە یان ژمارەی ددان دروست نییە');
-  result=db.prepare('INSERT INTO treatments(patient_id,tooth,kind,doctor,cost,paid,notes,date) VALUES(?,?,?,?,?,?,?,?)').run(b.patient_id,b.tooth,required(b.kind,100),required(b.doctor,100),b.cost,b.paid,clean(b.notes,3000),requireDate(b.date));
+  result=db.prepare('INSERT INTO treatments(patient_id,tooth,kind,doctor,cost,paid,notes,date) VALUES(?,?,?,?,?,?,?,?)').run(b.patient_id,b.tooth,required(b.kind,100),required(b.doctor,100),b.cost,b.paid,clean(b.notes,3000),requireDate(b.date??localToday()));
   if(b.plan_id){
    const plan=db.prepare('SELECT * FROM plans WHERE id=?').get(b.plan_id);
    if(!plan||plan.patient_id!==b.patient_id||plan.tooth!==b.tooth||plan.status!=='planned')fail('پلانی چارەسەر گونجاو نییە');
@@ -145,7 +149,7 @@ const server=http.createServer(async(req,res)=>{
   const session=token?db.prepare('SELECT s.*,u.name,u.username,u.role,u.active FROM sessions s JOIN users u ON u.id=s.user_id WHERE token=? AND expires>? AND active=1').get(sessionHash(token),Date.now()):null;
   const user=session?{id:session.user_id,name:session.name,username:session.username,role:session.role}:null;
   const setup=!db.prepare('SELECT id FROM users LIMIT 1').get();
-  if(url.pathname==='/healthz'&&req.method==='GET'){db.prepare('SELECT 1').get();return json(200,{ok:true,service:'yawar-clinic'});}
+  if(url.pathname==='/healthz'&&req.method==='GET'){db.prepare('SELECT 1').get();return json(200,{ok:true,service:'yawar-clinic',storage:dataIdentity(dataDir)});}
   if(url.pathname==='/api/auth'&&req.method==='GET')return json(200,{setup,user,csrf:session?.csrf});
   if(['POST','PATCH','DELETE'].includes(req.method)){
    if(req.headers.origin&&req.headers.origin!==`${process.env.PUBLIC_ORIGIN||`http://${req.headers.host}`}`)fail('پەیوەندی نادروستە',403);
@@ -206,7 +210,7 @@ const server=http.createServer(async(req,res)=>{
       const before=db.prepare('SELECT * FROM patients WHERE id=?').get(id);if(!before)fail('نەخۆش نەدۆزرایەوە',404);
       if(user.role==='reception'){const existing=db.prepare('SELECT history,allergies FROM patients WHERE id=?').get(id);if(!existing)fail('نەخۆش نەدۆزرایەوە',404);b.history=existing.history;b.allergies=existing.allergies;}
       if(b.birth_date&&!validDate(b.birth_date))fail('بەروار نادروستە');
-      changes=db.prepare('UPDATE patients SET name=?,phone=?,history=?,birth_date=?,gender=?,address=?,allergies=? WHERE id=?').run(required(b.name,100),required(b.phone,40),clean(b.history,3000),clean(b.birth_date,10),clean(b.gender,20),clean(b.address),clean(b.allergies,1000),id).changes;saveRevision(user,entity,id,before,db.prepare('SELECT * FROM patients WHERE id=?').get(id),b.change_reason||'patient update');
+      changes=db.prepare('UPDATE patients SET name=?,phone=?,history=?,birth_date=?,gender=?,address=?,allergies=?,registered_date=? WHERE id=?').run(required(b.name,100),required(b.phone,40),clean(b.history,3000),clean(b.birth_date,10),clean(b.gender,20),clean(b.address),clean(b.allergies,1000),requireDate(b.registered_date??before.registered_date),id).changes;saveRevision(user,entity,id,before,db.prepare('SELECT * FROM patients WHERE id=?').get(id),b.change_reason||'patient update');
      }else if(entity==='appointments'){
       const before=db.prepare('SELECT * FROM appointments WHERE id=?').get(id);if(!before)fail('مەوعید نەدۆزرایەوە',404);
       if(b.status!==undefined){
@@ -238,9 +242,17 @@ const server=http.createServer(async(req,res)=>{
      }else if(entity==='inventory'){
       if(!int(b.quantity)||!int(b.minimum))fail('ژمارە نادروستە');changes=db.prepare('UPDATE inventory SET name=?,quantity=?,minimum=? WHERE id=?').run(required(b.name,150),b.quantity,b.minimum,id).changes;
      }else if(entity==='users'){
-      if(id===user.id)fail('هەژماری خۆت لێرە ناگۆڕدرێت');
-      if(b.password!==undefined){changes=db.prepare('UPDATE users SET password=? WHERE id=?').run(password(b.password),id).changes;db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);}else{
-       if(![0,1].includes(b.active))fail('دۆخ نادروستە');changes=db.prepare('UPDATE users SET active=? WHERE id=?').run(b.active,id).changes;if(!b.active)db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);
+      const before=db.prepare('SELECT id,name,username,role,active FROM users WHERE id=?').get(id);if(!before)fail('بەکارهێنەر نەدۆزرایەوە',404);
+      if(b.password!==undefined){
+       if(id===user.id)fail('بۆ گۆڕینی وشەی نهێنی خۆت، بەشی وشەی نهێنی بەکاربهێنە');
+       changes=db.prepare('UPDATE users SET password=? WHERE id=?').run(password(b.password),id).changes;db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);
+      }else{
+       const role=b.role??before.role,active=b.active??before.active,name=b.name===undefined?before.name:required(b.name,100),username=b.username===undefined?before.username:required(b.username,60).toLowerCase();
+       if(!['admin','doctor','reception'].includes(role)||![0,1].includes(active))fail('ڕۆڵ یان دۆخ نادروستە');
+       if(before.role==='admin'&&before.active===1&&(role!=='admin'||active===0)&&db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND active=1").get().n<=1)fail('ناتوانیت دوایین بەڕێوەبەری چالاک ناچالاک بکەیت یان ڕۆڵەکەی بگۆڕیت');
+       changes=db.prepare('UPDATE users SET name=?,username=?,role=?,active=? WHERE id=?').run(name,username,role,active,id).changes;
+       saveRevision(user,entity,id,before,{id,name,username,role,active},'user profile/role update');
+       if(role!==before.role||active!==before.active||username!==before.username)db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);
       }
      }else if(entity==='settings'){
       for(const k of ['name','phone','address'])db.prepare('INSERT OR REPLACE INTO settings VALUES(?,?)').run(k,k==='name'?required(b[k],100):clean(b[k]));changes=1;
@@ -250,9 +262,9 @@ const server=http.createServer(async(req,res)=>{
    }
    fail('داواکاری پشتگیری ناکرێت',405);
   }
-  const files={'/':'index.html','/app.js':'app.js','/style.css':'style.css'};
+  const files={'/':'index.html','/app.js':'app.js','/style.css':'style.css','/clinic.svg':'clinic.svg'};
   if(req.method!=='GET'||!files[url.pathname])fail('نەدۆزرایەوە',404);
-  res.writeHead(200,{'Content-Type':url.pathname.endsWith('.js')?'text/javascript; charset=utf-8':url.pathname.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8'});res.end(readFileSync(path.join(root,'public',files[url.pathname])));
+  res.writeHead(200,{'Content-Type':url.pathname.endsWith('.svg')?'image/svg+xml':url.pathname.endsWith('.js')?'text/javascript; charset=utf-8':url.pathname.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8'});res.end(readFileSync(path.join(root,'public',files[url.pathname])));
  }catch(e){const constraint=String(e.message).includes('constraint');json(e.status||(constraint?400:500),{error:e.status?e.message:constraint?(e.message.includes('UNIQUE')?'ناوی بەکارهێنەر یان کاتی مەوعید پێشتر گیراوە':'زانیاری تۆمار دروست نییە'):'هەڵەیەک ڕوویدا؛ دووبارە هەوڵ بدەرەوە'});}
 });
 server.requestTimeout=30000;server.headersTimeout=15000;
