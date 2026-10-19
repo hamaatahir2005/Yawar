@@ -1,0 +1,11 @@
+# Optional LAN mode, with a locally trusted private certificate.
+# Example CLINIC_HOST=192.168.1.50 (a static LAN address of the Windows PC).
+# Every client must trust Caddy's root CA before sending patient data.
+https://{$CLINIC_HOST} {
+    tls internal
+    encode zstd gzip
+    request_body {
+        max_size 8MB
+    }
+    reverse_proxy 127.0.0.1:3000
+}
