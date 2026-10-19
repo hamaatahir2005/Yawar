@@ -1,0 +1,2 @@
+# Keep standalone Windows launchers byte-for-byte compatible in GitHub archives.
+*.cmd -text whitespace=cr-at-eol

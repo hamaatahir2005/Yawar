@@ -4,7 +4,7 @@ Kurdish Sorani / RTL clinic management application for one clinic. Node.js 24+, 
 
 ## Windows clinic deployment
 
-The Windows-x64 release includes a checksum-verified official Node.js runtime. Extract it to a permanent local folder and double-click `Start-Clinic.cmd`. It opens the browser, binds to loopback, and keeps data in `data/`. There is no default account. `Backup-Clinic.cmd` creates a verified manual snapshot. Read [the Kurdish Windows guide](deploy/WINDOWS-ckb.md). Source-only checkouts require Node.js 24+. Native Windows launch and optional Caddy LAN setup still require validation on the clinic computer; automated tests here ran on Linux.
+The Windows-x64 release includes a checksum-verified official Node.js runtime. Extract it to a permanent local folder and double-click `Start-Clinic.cmd`. It opens the browser, binds to loopback, and keeps data in `data/`. There is no default account. `Backup-Clinic.cmd` creates a verified manual snapshot. Read [the Kurdish Windows guide](deploy/WINDOWS-ckb.md). Source-only checkouts require Node.js 24+. If Explorer opens only the CMD inside a ZIP, the launcher now downloads the complete project into `%LOCALAPPDATA%\YawarClinic\app-launcher-v2` and uses `%LOCALAPPDATA%\YawarClinic\data` unless DATA_DIR is explicitly set. An Internet connection to GitHub is needed only for that first recovery download; complete extracted folders and cached recovery installations start offline. No existing data from other locations is moved or overwritten. Native Windows launch and optional Caddy LAN setup still require validation on the clinic computer; automated tests here ran on Linux.
 
 ## Start
 
@@ -66,3 +66,5 @@ The tool validates integrity and required tables, preserves the previous databas
 ## Operational checks
 
 `GET /healthz` checks database reachability without exposing clinic records. The process handles SIGTERM/SIGINT gracefully. On Windows keep the server window open; prevent sleep during clinic hours. For optional LAN use, see the Caddy private-CA configuration and Windows guide. Do not bypass browser certificate warnings. No cloud deployment or actual Windows installation has been performed from this Linux workspace.
+
+Launcher recovery tests run the embedded PowerShell script against fixture archives, paths containing spaces/apostrophes, complete extracted folders, ZIP-only startup, offline cache reuse, custom data paths and damaged archives. Set `POWERSHELL_BIN` to a PowerShell executable to include them in `npm test`; otherwise the PowerShell-dependent group is explicitly skipped. These are script tests, not a claim of testing Windows Explorer itself.
