@@ -1,5 +1,15 @@
 # یاوەر — Yawar Dental Clinic
 
+## ⬇ داگرتنی بەرنامەی Windows
+
+**[داگرتنی Yawar Setup.exe بۆ Windowsی ٦٤ بیت](https://github.com/hamaatahir2005/Yawar/raw/refs/heads/windows-downloads/Yawar-Setup.exe)**
+
+[بینینی فایلی Setup لە GitHub](https://github.com/hamaatahir2005/Yawar/blob/windows-downloads/Yawar-Setup.exe) · [ڕێنمایی دامەزراندن بە کوردی](deploy/WINDOWS-ckb.md)
+
+پێش دامەزراندن، پاشەکەوتێک دابگرە و پەنجەرەکانی سیستەمی کۆن دابخە. Node.js لەناو Setupەکەدایە. فایلەکە واژۆی دیجیتاڵی نییە و دامەزراندنی ڕاستەقینەی Windows لەم ژینگەیەدا تاقی نەکراوەتەوە.
+
+---
+
 Kurdish Sorani / RTL clinic management application for one clinic. Node.js 24+, SQLite, no runtime packages or external service credentials. Responsive desktop/mobile interface, empty initial database, no default passwords.
 
 ## Windows desktop installer (v3)
