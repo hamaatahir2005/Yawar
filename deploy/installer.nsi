@@ -45,7 +45,7 @@ Section "Yawar Clinic" SEC_MAIN
  CreateShortCut "$SMPROGRAMS\Yawar Clinic\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
  WriteRegStr HKCU "Software\YawarClinic" "InstallLocation" "$INSTDIR"
  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YawarClinic" "DisplayName" "Yawar Dental Clinic"
- WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YawarClinic" "DisplayVersion" "3.0.0"
+ WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YawarClinic" "DisplayVersion" "4.0.0"
  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YawarClinic" "DisplayIcon" "$INSTDIR\deploy\assets\clinic.ico"
  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YawarClinic" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YawarClinic" "NoModify" 1

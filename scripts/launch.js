@@ -14,7 +14,7 @@ const child=spawn(process.execPath,[path.join(root,'server.js')],{cwd:root,env:{
 child.on('error',e=>{console.error(e.message);process.exitCode=1;});
 child.on('exit',code=>process.exit(code||0));
 for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>child.kill(signal));
-for(let i=0;i<40;i++){
+for(let i=0;i<480;i++){
  try{const r=await fetch(url+'/healthz',{signal:AbortSignal.timeout(1000)});if(r.ok&&(await r.json()).service==='yawar-clinic'){openBrowser();break;}}catch{}
  await new Promise(r=>setTimeout(r,250));
 }

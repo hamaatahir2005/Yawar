@@ -1,5 +1,5 @@
 import {spawn} from 'node:child_process';
-import {existsSync,mkdirSync,writeFileSync,rmSync,mkdtempSync} from 'node:fs';
+import {existsSync,mkdirSync,writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {desktopDataDirectory,dataIdentity} from './desktop-config.js';
@@ -18,11 +18,11 @@ try{
  if(!ready){
   server=spawn(process.execPath,[path.join(root,'server.js')],{cwd:root,env:{...process.env,HOST:'127.0.0.1',PORT:String(port),DATA_DIR:data,PUBLIC_ORIGIN:url,COOKIE_SECURE:'0'},windowsHide:true,stdio:['ignore','pipe','pipe']});owned=true;
   let diagnostics='';for(const stream of [server.stdout,server.stderr])stream.on('data',b=>{diagnostics=(diagnostics+b).slice(-16000);});server.on('error',e=>{diagnostics=e.message;});
-  for(let i=0;i<80;i++){if(server.exitCode!==null)break;try{const r=await fetch(url+'/healthz',{signal:AbortSignal.timeout(1000)});const h=await r.json();if(r.ok&&h.service==='yawar-clinic'&&h.storage===expected){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,250));}
+  for(let i=0;i<480;i++){if(server.exitCode!==null)break;try{const r=await fetch(url+'/healthz',{signal:AbortSignal.timeout(1000)});const h=await r.json();if(r.ok&&h.service==='yawar-clinic'&&h.storage===expected){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,250));}
   if(!ready){writeFileSync(path.join(data,'desktop-error.log'),diagnostics||'Server did not become ready.');throw Error('Unable to start the clinic. See desktop-error.log in your clinic data folder.');}
  }
- const profiles=path.join(data,'desktop-browser');mkdirSync(profiles,{recursive:true});const profile=mkdtempSync(path.join(profiles,'session-'));
+ const profiles=path.join(data,'desktop-browser');mkdirSync(profiles,{recursive:true});const profile=path.join(profiles,'profile');mkdirSync(profile,{recursive:true});
  const window=spawn(browser,[`--app=${url}`,`--user-data-dir=${profile}`,'--no-first-run','--disable-background-mode','--no-default-browser-check'],{windowsHide:false,stdio:'ignore'});
- window.once('error',e=>{stop();message(e.message);});window.once('exit',()=>{stop();try{rmSync(profile,{recursive:true,force:true,maxRetries:3,retryDelay:100});}catch{}process.exit(0);});
+ window.once('error',e=>{stop();message(e.message);});window.once('exit',()=>{stop();process.exit(0);});
  for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>{stop();process.exit(0);});
 }catch(e){stop();if(logDirectory)writeFileSync(path.join(logDirectory,'desktop-error.log'),e.stack||e.message);message(e.message);process.exitCode=1;}

@@ -12,6 +12,11 @@ const dataDir=process.env.DATA_DIR||path.join(root,'data');
 mkdirSync(dataDir,{recursive:true,mode:0o700});
 const db=new DatabaseSync(path.join(dataDir,'clinic.sqlite'));
 chmodSync(path.join(dataDir,'clinic.sqlite'),0o600);
+// Take a consistent, private recovery snapshot before upgrading an existing clinic.
+if(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='patients'").get()&&db.prepare('PRAGMA user_version').get().user_version<4){
+ const recovery=path.join(dataDir,'before-v4-'+new Date().toISOString().replace(/[:.]/g,'-')+'.sqlite');
+ await backup(db,recovery);chmodSync(recovery,0o600);
+}
 db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS patients(id INTEGER PRIMARY KEY,name TEXT NOT NULL,phone TEXT NOT NULL,history TEXT NOT NULL DEFAULT '',created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS treatments(id INTEGER PRIMARY KEY,patient_id INTEGER NOT NULL REFERENCES patients(id),tooth INTEGER NOT NULL,kind TEXT NOT NULL,doctor TEXT NOT NULL,cost INTEGER NOT NULL CHECK(cost>=0),paid INTEGER NOT NULL CHECK(paid>=0 AND paid<=cost),notes TEXT NOT NULL DEFAULT '',date TEXT NOT NULL);
@@ -48,6 +53,19 @@ addColumn('treatments','plan_id','INTEGER REFERENCES plans(id)');
 db.exec(`CREATE TABLE IF NOT EXISTS plans(id INTEGER PRIMARY KEY,patient_id INTEGER NOT NULL REFERENCES patients(id),tooth INTEGER NOT NULL,kind TEXT NOT NULL,doctor TEXT NOT NULL,estimate INTEGER NOT NULL CHECK(estimate>=0),notes TEXT NOT NULL DEFAULT '',date TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'planned');
 CREATE TABLE IF NOT EXISTS refunds(id INTEGER PRIMARY KEY,treatment_id INTEGER NOT NULL REFERENCES treatments(id),amount INTEGER NOT NULL CHECK(amount>0),reason TEXT NOT NULL,date TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS revisions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,entity TEXT NOT NULL,record_id INTEGER NOT NULL,before_json TEXT NOT NULL,after_json TEXT NOT NULL,reason TEXT NOT NULL,created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
+transactionMigration();
+function transactionMigration(){
+ db.exec('BEGIN IMMEDIATE');
+ try{
+  db.exec(`CREATE TABLE IF NOT EXISTS visits(id INTEGER PRIMARY KEY,patient_id INTEGER NOT NULL REFERENCES patients(id),date TEXT NOT NULL,doctor TEXT NOT NULL,payment_mode TEXT NOT NULL CHECK(payment_mode IN ('cash','debt','installments')),notes TEXT NOT NULL DEFAULT '');
+  CREATE TABLE IF NOT EXISTS installments(id INTEGER PRIMARY KEY,visit_id INTEGER NOT NULL REFERENCES visits(id),due_date TEXT NOT NULL,amount INTEGER NOT NULL CHECK(amount>0),paid INTEGER NOT NULL DEFAULT 0 CHECK(paid>=0 AND paid<=amount),status TEXT NOT NULL DEFAULT 'active',note TEXT NOT NULL DEFAULT '');
+  CREATE TABLE IF NOT EXISTS refund_allocations(id INTEGER PRIMARY KEY,refund_id INTEGER NOT NULL REFERENCES refunds(id),payment_id INTEGER NOT NULL REFERENCES payments(id),installment_id INTEGER NOT NULL REFERENCES installments(id),amount INTEGER NOT NULL CHECK(amount>0));
+  CREATE INDEX IF NOT EXISTS installment_visit ON installments(visit_id,due_date);`);
+  addColumn('treatments','visit_id','INTEGER REFERENCES visits(id)');
+  addColumn('payments','installment_id','INTEGER REFERENCES installments(id)');
+  db.exec('PRAGMA user_version=4; COMMIT');
+ }catch(e){db.exec('ROLLBACK');throw e;}
+}
 let backupStatus={enabled:true,last:null,error:null};
 let backupRunning=false;
 const backupDir=process.env.BACKUP_DIR||path.join(dataDir,'backups');
@@ -85,9 +103,73 @@ function appointmentValues(b,id=0){
 function saveRevision(user,entity,id,before,after,reason){
  db.prepare('INSERT INTO revisions(user_id,entity,record_id,before_json,after_json,reason) VALUES(?,?,?,?,?,?)').run(user.id,entity,id,JSON.stringify(before),JSON.stringify(after),required(reason,500));
 }
+function scheduledBalance(visitId,reason,date=localToday()){
+ const visit=db.prepare('SELECT * FROM visits WHERE id=?').get(visitId);if(!visit||visit.payment_mode!=='installments')return;
+ const target=db.prepare('SELECT COALESCE(SUM(cost-paid),0) AS n FROM treatments WHERE visit_id=?').get(visitId).n;
+ const current=db.prepare("SELECT COALESCE(SUM(amount-paid),0) AS n FROM installments WHERE visit_id=? AND status='active'").get(visitId).n;
+ let difference=target-current;
+ if(difference>0){const last=db.prepare('SELECT MAX(due_date) AS date FROM installments WHERE visit_id=?').get(visitId).date;db.prepare('INSERT INTO installments(visit_id,due_date,amount,note) VALUES(?,?,?,?)').run(visitId,last&&last>date?last:date,difference,reason);}
+ else if(difference<0){
+  let reduction=-difference;const rows=db.prepare("SELECT * FROM installments WHERE visit_id=? AND status='active' AND amount>paid ORDER BY due_date DESC,id DESC").all(visitId);
+  for(const row of rows){if(!reduction)break;const take=Math.min(reduction,row.amount-row.paid);if(take===row.amount)db.prepare("UPDATE installments SET status='cancelled',note=? WHERE id=?").run(reason,row.id);else db.prepare('UPDATE installments SET amount=amount-?,note=? WHERE id=?').run(take,reason,row.id);reduction-=take;}
+ }
+}
+function paymentRows(t,b){
+ const visit=t.visit_id?db.prepare('SELECT * FROM visits WHERE id=?').get(t.visit_id):null;
+ const rows=[];let remaining=b.amount;
+ if(visit?.payment_mode==='installments'){
+  const candidates=b.installment_id?[db.prepare("SELECT * FROM installments WHERE id=? AND visit_id=? AND status='active'").get(b.installment_id,t.visit_id)].filter(Boolean):db.prepare("SELECT * FROM installments WHERE visit_id=? AND status='active' AND amount>paid ORDER BY due_date,id").all(t.visit_id);
+  for(const row of candidates){const take=Math.min(remaining,row.amount-row.paid);if(take>0){rows.push({amount:take,installment_id:row.id});remaining-=take;}if(!remaining)break;}
+  if(remaining)fail('پارەدان لەگەڵ خشتەی قیستەکان ناگونجێت');
+ }else{if(b.installment_id)fail('ئەم چارەسەرە قیستی نییە');rows.push({amount:b.amount,installment_id:null});}
+ let first;
+ for(const row of rows){const result=db.prepare('INSERT INTO payments(treatment_id,amount,date,note,installment_id) VALUES(?,?,?,?,?)').run(t.id,row.amount,requireDate(b.date),clean(b.note),row.installment_id);if(!first)first=result;if(row.installment_id)db.prepare('UPDATE installments SET paid=paid+? WHERE id=?').run(row.amount,row.installment_id);}
+ db.prepare('UPDATE treatments SET paid=paid+? WHERE id=?').run(b.amount,t.id);return first;
+}
 function create(entity,b,u){
  let result;
- if(entity==='patients'){
+ if(entity==='visits'){
+  if(!Array.isArray(b.items)||!b.items.length||b.items.length>100)fail('لانیکەم چارەسەرێک هەڵبژێرە (زۆرترین ١٠٠)');
+  const mode=b.payment_mode;if(!['cash','debt','installments'].includes(mode))fail('جۆری پارەدان هەڵبژێرە');
+  let total=0;for(const item of b.items){if(!item||!teeth.includes(item.tooth)||!int(item.cost)||!clean(item.kind))fail('زانیاری چارەسەر دروست نییە');total+=item.cost;}
+  if(!int(total)||total>100000000000)fail('کۆی نرخ زۆر گەورەیە');
+  if(!int(b.paid)||b.paid>total||(mode==='cash'&&b.paid!==total)||(mode!=='cash'&&b.paid===total))fail('پارەی دراو لەگەڵ جۆری پارەدان ناگونجێت');
+  const date=requireDate(b.date??localToday()),doctor=required(b.doctor,100);
+  let patientId=b.patient_id;
+  if(b.new_patient){
+   const name=required(b.new_patient.name,100),phone=required(b.new_patient.phone,40);
+   if(db.prepare('SELECT id FROM patients WHERE name=? AND phone=?').get(name,phone))fail('ئەم نەخۆشە پێشتر تۆمارکراوە؛ لە نەخۆشەکان هەڵیبژێرە',409);
+   patientId=create('patients',{...b.new_patient,name,phone,registered_date:date},u);
+  }
+  if(!Number.isInteger(patientId)||!db.prepare('SELECT id FROM patients WHERE id=?').get(patientId))fail('نەخۆش هەڵبژێرە یان زانیاری نەخۆشی نوێ بنووسە');
+  result=db.prepare('INSERT INTO visits(patient_id,date,doctor,payment_mode,notes) VALUES(?,?,?,?,?)').run(patientId,date,doctor,mode,clean(b.notes,3000));
+  const visitId=Number(result.lastInsertRowid);let upfront=b.paid;
+  for(const item of b.items){const paid=Math.min(upfront,item.cost);upfront-=paid;const id=create('treatments',{...item,patient_id:patientId,date,doctor,paid,notes:clean(item.notes??b.notes,3000)},u);db.prepare('UPDATE treatments SET visit_id=? WHERE id=?').run(visitId,id);}
+  if(mode==='installments'){
+   if(!Array.isArray(b.schedule)||!b.schedule.length||b.schedule.length>60)fail('خشتەی قیستەکان دروست بکە (١ بۆ ٦٠ قیست)');
+   let scheduled=0;for(const row of b.schedule){if(!row||!int(row.amount)||!row.amount)fail('بڕی هەر قیستێک دەبێت لە سفر زیاتر بێت');scheduled+=row.amount;requireDate(row.due_date);}
+   if(scheduled!==total-b.paid)fail('کۆی قیستەکان دەبێت یەکسان بێت بە پارەی ماوە');
+   for(const row of b.schedule)db.prepare('INSERT INTO installments(visit_id,due_date,amount) VALUES(?,?,?)').run(visitId,row.due_date,row.amount);
+  }
+ }else if(entity==='financing'){
+  const t=getTreatment(b.treatment_id);let visitId=t.visit_id;
+  if(visitId){const visit=db.prepare('SELECT * FROM visits WHERE id=?').get(visitId);if(visit.payment_mode==='installments')fail('ئەم سەردانە پێشتر خشتەی قیستی هەیە');}
+  const remaining=visitId?db.prepare('SELECT SUM(cost-paid) AS n FROM treatments WHERE visit_id=?').get(visitId).n:t.cost-t.paid;
+  if(remaining<=0)fail('ئەم حسابە قەرزی ماوەی نییە');
+  if(!Array.isArray(b.schedule)||!b.schedule.length||b.schedule.length>60)fail('خشتەی قیستەکان دروست نییە');
+  let scheduled=0;for(const row of b.schedule){if(!row||!int(row.amount)||!row.amount)fail('بڕی قیست نادروستە');scheduled+=row.amount;requireDate(row.due_date);}if(scheduled!==remaining)fail('خشتەی قیست دەبێت یەکسان بێت بە قەرزی ماوە؛ حسابەکە نوێ بکەرەوە');
+  if(!visitId){const visit=db.prepare("INSERT INTO visits(patient_id,date,doctor,payment_mode,notes) VALUES(?,?,?,'installments','پلانی قیست بۆ قەرزی پێشوو')").run(t.patient_id,t.date,t.doctor);visitId=Number(visit.lastInsertRowid);db.prepare('UPDATE treatments SET visit_id=? WHERE id=?').run(visitId,t.id);}else db.prepare("UPDATE visits SET payment_mode='installments' WHERE id=?").run(visitId);
+  for(const row of b.schedule)db.prepare('INSERT INTO installments(visit_id,due_date,amount) VALUES(?,?,?)').run(visitId,row.due_date,row.amount);
+  result={lastInsertRowid:visitId};
+ }else if(entity==='installmentpayments'){
+  if(!Number.isSafeInteger(b.installment_id))fail('قیست هەڵبژێرە');
+  const row=db.prepare("SELECT * FROM installments WHERE id=? AND status='active'").get(b.installment_id);
+  if(!row||!int(b.amount)||b.amount<=0||b.amount>row.amount-row.paid)fail('بڕی پارە لە ماوەی قیست زیاترە یان نادروستە');
+  let remaining=b.amount;const treatments=db.prepare('SELECT * FROM treatments WHERE visit_id=? AND cost>paid ORDER BY id').all(row.visit_id);
+  for(const t of treatments){if(!remaining)break;const take=Math.min(remaining,t.cost-t.paid);const id=create('payments',{treatment_id:t.id,amount:take,date:b.date,note:b.note,installment_id:row.id},u);if(!result)result={lastInsertRowid:id};remaining-=take;}
+  if(remaining)fail('قیست لەگەڵ حسابی چارەسەر ناگونجێت');
+ }else if(entity==='patients'){
+
   if(b.birth_date&&!validDate(b.birth_date))fail('بەرواری لەدایکبوون نادروستە');
   result=db.prepare('INSERT INTO patients(name,phone,history,birth_date,gender,address,allergies,registered_date) VALUES(?,?,?,?,?,?,?,?)').run(required(b.name,100),required(b.phone,40),clean(b.history,3000),clean(b.birth_date,10),clean(b.gender,20),clean(b.address),clean(b.allergies,1000),requireDate(b.registered_date??localToday()));
  }else if(entity==='treatments'){
@@ -109,11 +191,17 @@ function create(entity,b,u){
   if(!int(b.amount)||!b.amount||b.amount>t.paid)fail('گەڕاندنەوە نابێت لە پارەی وەرگیراو زیاتر بێت');
   result=db.prepare('INSERT INTO refunds(treatment_id,amount,reason,date) VALUES(?,?,?,?)').run(t.id,b.amount,required(b.reason,500),requireDate(b.date));
   db.prepare('UPDATE treatments SET paid=paid-? WHERE id=?').run(b.amount,t.id);
+  if(t.visit_id){
+   let remaining=b.amount;
+   const payments=db.prepare('SELECT p.*,p.amount-COALESCE((SELECT SUM(a.amount) FROM refund_allocations a WHERE a.payment_id=p.id),0) AS refundable FROM payments p WHERE treatment_id=? AND installment_id IS NOT NULL ORDER BY id DESC').all(t.id);
+   for(const payment of payments){if(!remaining)break;const take=Math.min(remaining,payment.refundable);if(take>0){db.prepare('INSERT INTO refund_allocations(refund_id,payment_id,installment_id,amount) VALUES(?,?,?,?)').run(result.lastInsertRowid,payment.id,payment.installment_id,take);db.prepare('UPDATE installments SET paid=paid-? WHERE id=?').run(take,payment.installment_id);remaining-=take;}}
+   scheduledBalance(t.visit_id,'ڕێکخستنی حساب دوای گەڕاندنەوەی پارە',b.date);
+  }
+
  }else if(entity==='payments'){
   const t=getTreatment(b.treatment_id);
   if(!int(b.amount)||b.amount===0||b.amount>t.cost-t.paid)fail('بڕی پارە دەبێت لە سفر زیاتر و لە قەرزی ماوە زیاتر نەبێت');
-  result=db.prepare('INSERT INTO payments(treatment_id,amount,date,note) VALUES(?,?,?,?)').run(t.id,b.amount,requireDate(b.date),clean(b.note));
-  db.prepare('UPDATE treatments SET paid=paid+? WHERE id=?').run(b.amount,t.id);
+  result=paymentRows(t,b);
  }else if(entity==='prescriptions'){
   if(!Number.isInteger(b.patient_id))fail('نەخۆش هەڵبژێرە');
   result=db.prepare('INSERT INTO prescriptions(patient_id,doctor,medicine,instructions,date) VALUES(?,?,?,?,?)').run(b.patient_id,required(b.doctor,100),required(b.medicine,2000),required(b.instructions,3000),requireDate(b.date));
@@ -135,7 +223,7 @@ function create(entity,b,u){
  }else fail('بەش نەدۆزرایەوە',404);
  audit(u,'create',entity,Number(result.lastInsertRowid));return Number(result.lastInsertRowid);
 }
-const access={admin:['plans','refunds','patients','treatments','appointments','payments','prescriptions','expenses','inventory','users','attachments','settings'],doctor:['plans','patients','treatments','appointments','prescriptions','attachments'],reception:['patients','appointments','payments']};
+const access={admin:['financing','visits','installmentpayments','plans','refunds','patients','treatments','appointments','payments','prescriptions','expenses','inventory','users','attachments','settings'],doctor:['visits','plans','patients','treatments','appointments','prescriptions','attachments'],reception:['financing','installmentpayments','patients','appointments','payments']};
 const attempts=new Map();
 function throttle(req){const key=req.socket.remoteAddress;const now=Date.now();let a=attempts.get(key);if(!a||a.until<now){a={count:0,until:now+900000};attempts.set(key,a);}if(++a.count>15)fail('هەوڵی زۆر؛ دوای ١٥ خولەک دووبارە هەوڵ بدەرەوە',429);}
 async function readBody(req){const chunks=[];let size=0;for await(const c of req){size+=c.length;if(size>7*1024*1024)fail('فایل زۆر گەورەیە',413);chunks.push(c);}try{const parsed=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(!parsed||Array.isArray(parsed)||typeof parsed!=='object')fail('داواکاری نادروستە');return parsed;}catch{fail('داواکاری نادروستە');}}
@@ -167,8 +255,8 @@ const server=http.createServer(async(req,res)=>{
    }
    db.prepare('DELETE FROM sessions WHERE expires<?').run(Date.now());
    const sid=randomBytes(32).toString('hex'),csrf=randomBytes(24).toString('hex');
-   db.prepare('INSERT INTO sessions VALUES(?,?,?,?)').run(sessionHash(sid),account.id,csrf,Date.now()+8*60*60*1000);
-   res.setHeader('Set-Cookie',`session=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${process.env.COOKIE_SECURE==='1'?'; Secure':''}`);
+   db.prepare('INSERT INTO sessions VALUES(?,?,?,?)').run(sessionHash(sid),account.id,csrf,Date.now()+(b.remember===true?30*24:8)*60*60*1000);
+   res.setHeader('Set-Cookie',`session=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${b.remember===true?2592000:28800}${process.env.COOKIE_SECURE==='1'?'; Secure':''}`);
    audit(account,'login','users',account.id);return json(200,{ok:true});
   }
   if(url.pathname.startsWith('/api/')){
@@ -181,8 +269,8 @@ const server=http.createServer(async(req,res)=>{
     db.prepare('UPDATE users SET password=? WHERE id=?').run(password(b.password),user.id);db.prepare('DELETE FROM sessions WHERE user_id=?').run(user.id);audit(user,'password','users',user.id);return json(200,{ok:true});
    }
    if(url.pathname==='/api/state'&&req.method==='GET'){
-    const data={user,plans:db.prepare('SELECT * FROM plans ORDER BY date,id').all(),refunds:db.prepare('SELECT * FROM refunds ORDER BY id DESC').all(),patients:db.prepare('SELECT * FROM patients ORDER BY id DESC').all(),treatments:db.prepare('SELECT * FROM treatments ORDER BY date DESC,id DESC').all(),appointments:db.prepare('SELECT * FROM appointments ORDER BY date,time').all(),payments:db.prepare('SELECT * FROM payments ORDER BY id DESC').all(),prescriptions:db.prepare('SELECT * FROM prescriptions ORDER BY date DESC,id DESC').all(),attachments:db.prepare('SELECT id,patient_id,name,mime,created FROM attachments ORDER BY id DESC').all(),settings:Object.fromEntries(db.prepare('SELECT * FROM settings').all().map(s=>[s.key,s.value])),inventory:db.prepare('SELECT * FROM inventory ORDER BY name').all()};
-    if(user.role==='reception'){data.plans=[];data.patients=data.patients.map(p=>({...p,history:'',allergies:''}));data.treatments=data.treatments.map(t=>({...t,notes:''}));data.prescriptions=[];data.attachments=[];}
+    const data={user,visits:db.prepare('SELECT * FROM visits ORDER BY date DESC,id DESC').all(),installments:db.prepare('SELECT * FROM installments ORDER BY due_date,id').all(),refundAllocations:db.prepare('SELECT * FROM refund_allocations').all(),plans:db.prepare('SELECT * FROM plans ORDER BY date,id').all(),refunds:db.prepare('SELECT * FROM refunds ORDER BY id DESC').all(),patients:db.prepare('SELECT * FROM patients ORDER BY id DESC').all(),treatments:db.prepare('SELECT * FROM treatments ORDER BY date DESC,id DESC').all(),appointments:db.prepare('SELECT * FROM appointments ORDER BY date,time').all(),payments:db.prepare('SELECT * FROM payments ORDER BY id DESC').all(),prescriptions:db.prepare('SELECT * FROM prescriptions ORDER BY date DESC,id DESC').all(),attachments:db.prepare('SELECT id,patient_id,name,mime,created FROM attachments ORDER BY id DESC').all(),settings:Object.fromEntries(db.prepare('SELECT * FROM settings').all().map(s=>[s.key,s.value])),inventory:db.prepare('SELECT * FROM inventory ORDER BY name').all()};
+    if(user.role==='reception'){data.visits=data.visits.map(v=>({...v,notes:''}));data.plans=[];data.patients=data.patients.map(p=>({...p,history:'',allergies:''}));data.treatments=data.treatments.map(t=>({...t,notes:''}));data.prescriptions=[];data.attachments=[];}
     if(user.role==='admin'){data.backupStatus=backupStatus;data.expenses=db.prepare('SELECT * FROM expenses ORDER BY date DESC,id DESC').all();data.users=db.prepare('SELECT id,name,username,role,active FROM users').all();data.revisions=db.prepare('SELECT id,user_id,entity,record_id,reason,created FROM revisions ORDER BY id DESC LIMIT 100').all();data.audit=db.prepare('SELECT a.*,u.name FROM audit a LEFT JOIN users u ON a.user_id=u.id ORDER BY a.id DESC LIMIT 100').all();}return json(200,data);
    }
    if(url.pathname==='/api/backup'&&req.method==='GET'){
@@ -230,6 +318,7 @@ const server=http.createServer(async(req,res)=>{
       const before=getTreatment(id),reason=required(b.change_reason,500);
       if(b.cost!==undefined){if(user.role!=='admin')fail('تەنها بەڕێوەبەر نرخ دەگۆڕێت',403);if(!int(b.cost)||b.cost<before.paid)fail('نرخ نابێت لە پارەی وەرگیراو کەمتر بێت');}
       changes=db.prepare('UPDATE treatments SET kind=?,doctor=?,notes=?,cost=? WHERE id=?').run(required(b.kind??before.kind,100),required(b.doctor??before.doctor,100),b.notes===undefined?before.notes:clean(b.notes,3000),b.cost??before.cost,id).changes;
+      if(before.visit_id)scheduledBalance(before.visit_id,reason);
       saveRevision(user,entity,id,before,getTreatment(id),reason);
      }else if(entity==='prescriptions'){
       const before=db.prepare('SELECT * FROM prescriptions WHERE id=?').get(id);if(!before)fail('ڕەچەتە نەدۆزرایەوە',404);
@@ -262,7 +351,7 @@ const server=http.createServer(async(req,res)=>{
    }
    fail('داواکاری پشتگیری ناکرێت',405);
   }
-  const files={'/':'index.html','/app.js':'app.js','/style.css':'style.css','/clinic.svg':'clinic.svg'};
+  const files={'/':'index.html','/app.js':'app.js','/clinic-workflows.js':'clinic-workflows.js','/style.css':'style.css','/clinic.svg':'clinic.svg'};
   if(req.method!=='GET'||!files[url.pathname])fail('نەدۆزرایەوە',404);
   res.writeHead(200,{'Content-Type':url.pathname.endsWith('.svg')?'image/svg+xml':url.pathname.endsWith('.js')?'text/javascript; charset=utf-8':url.pathname.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8'});res.end(readFileSync(path.join(root,'public',files[url.pathname])));
  }catch(e){const constraint=String(e.message).includes('constraint');json(e.status||(constraint?400:500),{error:e.status?e.message:constraint?(e.message.includes('UNIQUE')?'ناوی بەکارهێنەر یان کاتی مەوعید پێشتر گیراوە':'زانیاری تۆمار دروست نییە'):'هەڵەیەک ڕوویدا؛ دووبارە هەوڵ بدەرەوە'});}
